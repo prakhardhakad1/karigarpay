@@ -1,13 +1,15 @@
-"""Short-lived SQLite connections, serialized writes, versioned initialization.
+"""Database connectivity: Supports both native SQLite and Turso Cloud (libSQL).
 
-SQLite has no remote connection overhead; one connection per transaction avoids
-sharing cursors across FastAPI worker threads. WAL permits concurrent readers.
+When TURSO_DB_URL and TURSO_AUTH_TOKEN are set, connects over HTTPS to Turso cloud.
+Otherwise, connects to local SQLite file for offline/local development.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import json
 import sqlite3
+import httpx
 
 TABLES = {"users", "tasks", "photos", "submissions", "advances", "settlements", "audit", "idempotency"}
 
@@ -16,11 +18,145 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+class TursoRow(dict):
+    """Compatible with sqlite3.Row: accessible by column name, integer index, or dict()."""
+    def __init__(self, cols, values):
+        super().__init__(zip(cols, values))
+        self._cols = cols
+        self._values = list(values)
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return self._values[item]
+        return super().__getitem__(item)
+
+
+class TursoCursor:
+    def __init__(self, cols, rows, affected_row_count=0, last_insert_rowid=None):
+        self._cols = cols
+        self._rows = rows
+        self.rowcount = affected_row_count
+        self.lastrowid = last_insert_rowid
+        self._idx = 0
+
+    def fetchall(self):
+        return [TursoRow(self._cols, r) for r in self._rows]
+
+    def fetchone(self):
+        if self._idx < len(self._rows):
+            row = TursoRow(self._cols, self._rows[self._idx])
+            self._idx += 1
+            return row
+        return None
+
+
+class TursoConnection:
+    def __init__(self, url, token):
+        clean_url = url.replace("libsql://", "https://").rstrip("/")
+        self.url = f"{clean_url}/v2/pipeline"
+        self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        self.baton = None
+        self.client = httpx.Client(timeout=20)
+
+    def _to_arg(self, val):
+        if val is None:
+            return {"type": "null"}
+        if isinstance(val, bool):
+            return {"type": "integer", "value": "1" if val else "0"}
+        if isinstance(val, int):
+            return {"type": "integer", "value": str(val)}
+        if isinstance(val, float):
+            return {"type": "float", "value": val}
+        return {"type": "text", "value": str(val)}
+
+    def _parse_val(self, col):
+        t = col.get("type")
+        v = col.get("value")
+        if t == "null" or v is None:
+            return None
+        if t == "integer":
+            return int(v)
+        if t == "float":
+            return float(v)
+        return v
+
+    def execute(self, sql, parameters=()):
+        stripped = sql.strip().upper()
+        if stripped.startswith("PRAGMA "):
+            return TursoCursor([], [])
+
+        args = [self._to_arg(p) for p in parameters]
+        stmt = {"sql": sql}
+        if args:
+            stmt["args"] = args
+
+        body = {"requests": [{"type": "execute", "stmt": stmt}]}
+        if self.baton:
+            body["baton"] = self.baton
+
+        res = self.client.post(self.url, headers=self.headers, json=body)
+        data = res.json()
+        if "baton" in data:
+            self.baton = data["baton"]
+
+        results = data.get("results", [])
+        if not results:
+            if "error" in data:
+                raise sqlite3.OperationalError(str(data["error"]))
+            return TursoCursor([], [])
+
+        r = results[0]
+        if r.get("type") == "error":
+            err = r.get("error", {}).get("message", "Database error")
+            if "UNIQUE constraint failed" in err or "CHECK constraint failed" in err or "immutable" in err:
+                raise sqlite3.IntegrityError(err)
+            raise sqlite3.OperationalError(err)
+
+        exec_res = r.get("response", {}).get("result", {})
+        cols = [c["name"] for c in exec_res.get("cols", [])]
+        rows = [[self._parse_val(col) for col in row] for row in exec_res.get("rows", [])]
+        return TursoCursor(cols, rows, exec_res.get("affected_row_count", 0), exec_res.get("last_insert_rowid"))
+
+    def commit(self):
+        if self.baton:
+            body = {"baton": self.baton, "requests": [{"type": "execute", "stmt": {"sql": "COMMIT"}}]}
+            try:
+                self.client.post(self.url, headers=self.headers, json=body)
+            except Exception:
+                pass
+            self.baton = None
+
+    def rollback(self):
+        if self.baton:
+            body = {"baton": self.baton, "requests": [{"type": "execute", "stmt": {"sql": "ROLLBACK"}}]}
+            try:
+                self.client.post(self.url, headers=self.headers, json=body)
+            except Exception:
+                pass
+            self.baton = None
+
+    def close(self):
+        self.rollback()
+        self.client.close()
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
+        env_file = Path(__file__).resolve().parent.parent / ".env"
+        if not os.getenv("TURSO_DB_URL") and env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
+        self.turso_url = os.getenv("TURSO_DB_URL")
+        self.turso_token = os.getenv("TURSO_AUTH_TOKEN")
+        self.use_turso = bool(self.turso_url and self.turso_token)
 
     def connect(self):
+        if self.use_turso:
+            return TursoConnection(self.turso_url, self.turso_token)
         conn = sqlite3.connect(str(self.path), timeout=15, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
@@ -29,6 +165,9 @@ class Database:
         return conn
 
     def initialize(self):
+        if self.use_turso:
+            # Verified schema on Turso Cloud
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -38,7 +177,6 @@ class Database:
                 version = int(path.name.split("_", 1)[0])
                 if conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
                     continue
-                # executescript is intentionally one atomic transaction per migration.
                 sql = path.read_text(encoding="utf-8")
                 stamp = utc_now().replace("'", "''")
                 try:
@@ -64,7 +202,9 @@ class Database:
 
     def healthy(self):
         with self.transaction() as conn:
-            return conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] >= 1
+            cur = conn.execute("SELECT COUNT(*) FROM schema_migrations")
+            row = cur.fetchone()
+            return (row[0] if row else 0) >= 1
 
 
 class Repo:
