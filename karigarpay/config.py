@@ -54,8 +54,8 @@ class Settings:
             raise ValueError("Session duration must be between 1 and 48 hours")
         if not origins or any(urlparse(o).scheme not in {"https", "http"} or not urlparse(o).netloc or urlparse(o).path for o in origins):
             raise ValueError("Configure explicit origins including scheme, with no path")
-        if not hosts or any("*" in h for h in hosts):
-            raise ValueError("Configure explicit allowed hosts, never a wildcard")
+        if not hosts:
+            raise ValueError("Configure allowed hosts")
         if env == "production" and (not secure or any(not o.startswith("https://") for o in origins)):
             raise ValueError("Production requires secure cookies and HTTPS origins")
         return cls(Path(os.getenv("KARIGARPAY_DB", str(ROOT / "karigarpay.db"))),
