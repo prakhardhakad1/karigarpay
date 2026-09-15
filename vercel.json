@@ -1,12 +1,20 @@
 {
-  "rewrites": [
+  "routes": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api/index.py?_route=$1"
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
     },
     {
-      "source": "/((?!api/|.*\\..*).*)",
-      "destination": "/static/index.html"
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/(.*\\.(js|css|png|jpg|svg|ico|webmanifest|json))",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/static/index.html"
     }
   ]
 }
