@@ -2,6 +2,7 @@ import sys
 import os
 import urllib.parse
 from pathlib import Path
+from fastapi import Request
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -10,6 +11,15 @@ if str(ROOT) not in sys.path:
 from karigarpay.app import create_app
 
 base_app = create_app()
+
+@base_app.get("/api/debug-route")
+@base_app.get("/debug-route")
+def debug_route(request: Request):
+    return {
+        "url_path": request.url.path,
+        "scope_path": request.scope.get("path"),
+        "headers": dict(request.headers)
+    }
 
 class VercelRouteMiddleware:
     def __init__(self, app):
@@ -34,7 +44,8 @@ class VercelRouteMiddleware:
                 target = f"/api{route}"
                 scope["path"] = target
                 scope["raw_path"] = target.encode("latin1")
-            elif scope.get("path", "").endswith(".py"):
+            else:
+                # Direct route or header check
                 headers = dict(scope.get("headers", []))
                 matched = headers.get(b"x-matched-path", b"").decode("latin1")
                 if matched and not matched.endswith(".py"):
