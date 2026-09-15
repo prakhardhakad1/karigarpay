@@ -58,6 +58,10 @@ class Settings:
             raise ValueError("Configure allowed hosts")
         if env == "production" and (not secure or any(not o.startswith("https://") for o in origins)):
             raise ValueError("Production requires secure cookies and HTTPS origins")
-        return cls(Path(os.getenv("KARIGARPAY_DB", str(ROOT / "karigarpay.db"))),
-                   Path(os.getenv("KARIGARPAY_UPLOADS", str(ROOT / "private_uploads"))),
-                   env, secure, origins, hosts, hours)
+        is_vercel = bool(os.getenv("VERCEL"))
+        default_db = "/tmp/karigarpay.db" if is_vercel else str(ROOT / "karigarpay.db")
+        default_uploads = "/tmp/private_uploads" if is_vercel else str(ROOT / "private_uploads")
+        return cls(Path(os.getenv("KARIGARPAY_DB", default_db)),
+                   Path(os.getenv("KARIGARPAY_UPLOADS", default_uploads)),
+                   env=env, secure_cookies=secure, origins=origins, hosts=hosts,
+                   session_hours=hours)
