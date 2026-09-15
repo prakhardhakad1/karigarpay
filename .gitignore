@@ -1,0 +1,11 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+private_uploads/
+__pycache__/
+.pytest_cache/
+.venv/
+outputs/
+*.pyc
+.playwright-cli/

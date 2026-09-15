@@ -1,0 +1,11 @@
+{
+  "name": "karigarpay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bilingual mobile staff and piece-rate ledger; no frontend build step required.",
+  "scripts": {
+    "test:voice": "node --test tests/voice.test.mjs",
+    "check": "node --check static/app.js && node --check static/voice.js"
+  }
+}
